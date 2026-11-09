@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import queue
 import threading
+import time
 import traceback
 
 import fan
@@ -27,9 +28,26 @@ action = {
 
 
 def receive_key(q):
+    # A gesture that started on a dark screen only wakes it up. Otherwise a
+    # double click on a dark screen would silently switch the fan off.
+    # The deadline covers the longest gesture, so a gesture the pattern
+    # matcher never recognised can't make us skip a later one.
+    skip_until = 0
     while True:
-        func = misc.get_func(q.get())
-        action[func]()
+        key = q.get()
+        try:
+            if key == 'down':
+                if oled.wake(lock):
+                    skip_until = (time.monotonic() + misc.conf['time']['press']
+                                  + misc.conf['time']['twice'] + 1)
+                continue
+            if oled.wake(lock) or time.monotonic() < skip_until:
+                skip_until = 0
+                continue
+            action[misc.get_func(key)]()
+        except Exception:
+            # Keep the key thread alive, or the screen can never be woken.
+            traceback.print_exc()
 
 
 if __name__ == '__main__':

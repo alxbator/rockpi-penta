@@ -71,6 +71,9 @@ def read_conf():
         conf['slider']['time'] = cfg.getfloat('slider', 'time')
         conf['oled']['rotate'] = cfg.getboolean('oled', 'rotate')
         conf['oled']['f-temp'] = cfg.getboolean('oled', 'f-temp')
+        # Newer than the other keys, so an old config may lack it. Without the
+        # fallback the except branch below would reset the fan levels too.
+        conf['oled']['timeout'] = cfg.getfloat('oled', 'timeout', fallback=10)
     except Exception:
         traceback.print_exc()
         # fan
@@ -90,11 +93,12 @@ def read_conf():
         conf['slider']['time'] = 10  # second
         conf['oled']['rotate'] = False
         conf['oled']['f-temp'] = False
+        conf['oled']['timeout'] = 10  # minutes
 
     return conf
 
 
-def read_key(pattern, size):
+def read_key(pattern, size, on_press=None):
     CHIP_NAME = os.environ['BUTTON_CHIP']
     LINE_NUMBER = os.environ['BUTTON_LINE']
 
@@ -105,7 +109,10 @@ def read_key(pattern, size):
     line.set_value(1)
 
     while True:
-        s = s[-size:] + str(line.get_value())
+        v = str(line.get_value())
+        if on_press and s.endswith('1') and v == '0':
+            on_press()  # the key has just gone down
+        s = s[-size:] + v
         for t, p in pattern.items():
             if p.match(s):
                 return t
@@ -122,7 +129,9 @@ def watch_key(q=None):
     }
 
     while True:
-        q.put(read_key(pattern, size))
+        # 'down' arrives as soon as the key goes down, before the gesture is
+        # recognised, so the screen can light up without delay.
+        q.put(read_key(pattern, size, on_press=lambda: q.put('down')))
 
 
 def get_disk_info(cache={}):
@@ -142,10 +151,6 @@ def get_disk_info(cache={}):
 def slider_next(pages):
     conf['idx'].value += 1
     return pages[conf['idx'].value % len(pages)]
-
-
-def slider_sleep():
-    time.sleep(conf['slider']['time'])
 
 
 def fan_temp2dc(t):

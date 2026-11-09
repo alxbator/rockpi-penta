@@ -1,6 +1,8 @@
 #!/usr/bin/python3
+import atexit
 import os
 import time
+import traceback
 
 import adafruit_ssd1306
 import board
@@ -34,6 +36,22 @@ disp = disp_init()
 
 image = Image.new('1', (disp.width, disp.height))
 draw = ImageDraw.Draw(image)
+
+
+def off_deadline():
+    """When to switch the screen off if no key is pressed from now on."""
+    minutes = misc.conf['oled']['timeout']
+    return time.monotonic() + minutes * 60 if minutes > 0 else float('inf')
+
+
+# Screen state, guarded by the lock that main.py passes around.
+#   on         - the panel is lit
+#   off_at     - time.monotonic() at which to switch it off
+#   next_slide - time.monotonic() at which auto_slider shows the next page
+screen = {'on': True, 'off_at': off_deadline(), 'next_slide': 0.0}
+
+# Don't leave a static picture lit when the service stops or crashes.
+atexit.register(disp.poweroff)
 
 
 def disp_show():
@@ -97,19 +115,62 @@ def gen_pages():
     return pages
 
 
+def show_page(page):
+    """Draw a page and schedule the next automatic slide. Caller holds the lock."""
+    for item in page:
+        draw.text(**item)
+    disp_show()
+    if misc.conf['slider']['auto']:
+        screen['next_slide'] = time.monotonic() + misc.conf['slider']['time']
+    else:
+        screen['next_slide'] = float('inf')
+
+
 def slider(lock):
     with lock:
-        for item in misc.slider_next(gen_pages()):
-            draw.text(**item)
-        disp_show()
+        if screen['on']:
+            show_page(misc.slider_next(gen_pages()))
+
+
+def wake(lock):
+    """Push the switch-off time back and light the screen if it is dark.
+
+    Returns True if the screen was dark: the key press that woke it
+    must not do anything else.
+    """
+    with lock:
+        screen['off_at'] = off_deadline()
+        if screen['on']:
+            return False
+        misc.conf['idx'].value = -1  # wake up on the first page
+        page = misc.slider_next(gen_pages())
+        # Not disp.poweron(): it pulses the reset pin, and the controller
+        # comes back unconfigured, i.e. still dark. init_display() sends
+        # the whole setup sequence and ends with "display on".
+        disp.init_display()
+        screen['on'] = True
+        show_page(page)
+        return True
 
 
 def auto_slider(lock):
-    while misc.conf['slider']['auto']:
-        slider(lock)
-        misc.slider_sleep()
-    else:
-        slider(lock)
+    """Show the next page every [slider] time seconds while the screen is lit,
+    and switch the screen off [oled] timeout minutes after the last key press.
+    """
+    while True:
+        try:
+            with lock:
+                now = time.monotonic()
+                if screen['on'] and now >= screen['off_at']:
+                    disp.poweroff()
+                    screen['on'] = False
+                due = screen['on'] and now >= screen['next_slide']
+            if due:
+                slider(lock)
+        except Exception:
+            # Keep the loop alive: if it dies, the screen is never switched off.
+            traceback.print_exc()
+        time.sleep(1)
 
 
 if __name__ == '__main__':
